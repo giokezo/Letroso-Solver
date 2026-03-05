@@ -19,35 +19,65 @@ def get_pattern(guess: str, answer: str) -> int:
         available[ch] = available.get(ch, 0) + 1
 
     state = [BLACK] * L1
-    ans_pos = {}
+    ans_pos = {}  # guess index → answer index for green matches
     ans_used = [False] * L2
 
-    # ── LCS computation ─────────────────────────────
-    dp = [[0]*(L2+1) for _ in range(L1+1)]
+    # ── Step 1: find the GREEN subsequence ───────────────────────────────────
+    # Priority order for choosing among multiple LCS of equal length:
+    #   1. Most consecutive pairs (adjacent in BOTH guess and answer simultaneously)
+    #   2. Earliest start in the sequence
+    #
+    # dp[i][j] = (L, C): best (LCS-length, consecutive-pairs) from position (i,j) onward.
+    # is_m[i][j]: True if the optimal alignment at (i,j) starts by matching guess[i]→answer[j].
+    # Boundary: dp[L1][*] = dp[*][L2] = (0,0), is_m boundary = False.
 
-    for i in range(L1-1, -1, -1):
-        for j in range(L2-1, -1, -1):
+    dp   = [[(0, 0)] * (L2 + 1) for _ in range(L1 + 1)]
+    is_m = [[False]   * (L2 + 1) for _ in range(L1 + 1)]
+
+    for i in range(L1 - 1, -1, -1):
+        for j in range(L2 - 1, -1, -1):
+            skip_i = dp[i + 1][j]   # skip guess[i]
+            skip_j = dp[i][j + 1]   # skip answer[j]
+            # When skip_i == skip_j, prefer skip_j: keeps guess[i] available
+            # for an earlier match, satisfying the "starts earlier" tiebreak.
+            best_skip = skip_i if skip_i > skip_j else skip_j
+
             if guess[i] == answer[j]:
-                dp[i][j] = 1 + dp[i+1][j+1]
+                nL, nC = dp[i + 1][j + 1]
+                # +1 consecutive bonus if the very next optimal step is also
+                # an immediate (i+1 → j+1) match.
+                bonus     = 1 if is_m[i + 1][j + 1] else 0
+                match_val = (1 + nL, nC + bonus)
+                # Prefer match when tied with skip (achieves earliest start).
+                if match_val >= best_skip:
+                    dp[i][j]   = match_val
+                    is_m[i][j] = True
+                else:
+                    dp[i][j]   = best_skip
             else:
-                dp[i][j] = max(dp[i+1][j], dp[i][j+1])
+                dp[i][j] = best_skip
 
+    # Traceback: follow is_m flags, tie-break toward earlier start.
     i = j = 0
     while i < L1 and j < L2:
-        if guess[i] == answer[j]:
-            state[i] = GREEN
+        if is_m[i][j]:
+            state[i]   = GREEN
             ans_pos[i] = j
             ans_used[j] = True
             available[guess[i]] -= 1
             i += 1
             j += 1
-        elif dp[i+1][j] >= dp[i][j+1]:
-            i += 1
         else:
-            j += 1
+            # When equal, prefer skip_j (same tiebreak as DP fill).
+            if dp[i + 1][j] > dp[i][j + 1]:
+                i += 1
+            else:
+                j += 1
 
-    # ── Step 3: right-to-left yellow assignment ─────
-    for i in range(L1-1, -1, -1):
+    # ── Step 2: non-green positions → YELLOW or BLACK (right-to-left) ────────
+    # Rightmost non-green positions get YELLOW first; leftmost excess → BLACK.
+    # ("excess copies get BLACK from the left")
+    for i in range(L1 - 1, -1, -1):
         if state[i] == GREEN:
             continue
         ch = guess[i]
@@ -55,109 +85,120 @@ def get_pattern(guess: str, answer: str) -> int:
             state[i] = YELLOW
             available[ch] -= 1
 
-    # ── Step 4: border upgrade ──────────────────────
+    # ── Step 3: upgrade GREEN → BORDER at answer boundaries ──────────────────
     for i, j in ans_pos.items():
-        if j == 0 or j == L2-1:
+        if j == 0 or j == L2 - 1:
             state[i] = BORDER
 
-    # ── Step 5: concatenation ───────────────────────
-    concat = [False] * L1
-    greens = sorted(ans_pos.keys())
+    # ── Step 4: concatenation between adjacent GREEN/BORDER pairs ─────────────
+    concat     = [False] * L1
+    green_list = sorted(ans_pos.keys())
+    for k in range(len(green_list) - 1):
+        gi = green_list[k]
+        gj = green_list[k + 1]
+        if gj == gi + 1 and ans_pos[gj] == ans_pos[gi] + 1:
+            concat[gi] = True
 
-    for k in range(len(greens)-1):
-        gi = greens[k]
-        gj = greens[k+1]
-
-        if gj == gi + 1:
-            if ans_pos[gj] == ans_pos[gi] + 1:
-                concat[gi] = True
-
-    # ── Encode pattern ──────────────────────────────
+    # ── Encode ────────────────────────────────────────────────────────────────
     result = 0
     for i in range(L1):
-        v = state[i]*2 + (1 if concat[i] else 0)
+        v = state[i] * 2 + (1 if concat[i] else 0)
         result += v * (_BASE ** i)
-
     return result
 
-# def matches_feedback(
-#     guess: str,
-#     candidate: str,
-#     states: list[int],
-#     concats: list[bool],
-# ) -> bool:
-#     """
-#     Return True if candidate word is compatible with manual feedback (states + concats).
-#     Does NOT require exact pattern_int match from get_pattern.
-#     """
-#     # Step 0: sanity
-#     if len(guess) != len(candidate) or len(states) != len(guess):
-#         return False
+def matches_feedback(
+    guess: str,
+    candidate: str,
+    states: list[int],
+    concats: list[bool],
+) -> bool:
+    """
+    Return True if candidate is compatible with the given feedback.
 
-#     # Count available letters in candidate
-#     available = {}
-#     for ch in candidate:
-#         available[ch] = available.get(ch, 0) + 1
+    Steps (in order, each consuming from the available letter pool):
+      1. GREEN/BORDER letters must appear as a left-to-right subsequence in
+         candidate.  BORDER letters must land at position 0 or len-1 of
+         candidate; CONCAT between two adjacent greens means their candidate
+         positions must be consecutive.
+      2. YELLOW letters must be present in the remaining pool (after greens
+         consumed their share).  In Letroso, yellow only means "present but
+         out of order relative to the green subsequence" — no position check.
+      3. BLACK letters must leave zero remaining copies in the pool (after
+         both greens and yellows have consumed theirs).  This correctly caps
+         the repetition count.
+    """
+    L2 = len(candidate)
 
-#     # Step 1: check greens / borders
-#     green_indices = []
-#     for i, s in enumerate(states):
-#         gch = guess[i]
-#         if s >= GREEN:
-#             # Must appear somewhere in candidate, respecting order for green
-#             found = False
-#             for j, cch in enumerate(candidate):
-#                 if cch == gch and (j not in green_indices):
-#                     green_indices.append(j)
-#                     available[cch] -= 1
-#                     found = True
-#                     break
-#             if not found:
-#                 return False
+    # Available letter counts in candidate
+    available: dict[str, int] = {}
+    for ch in candidate:
+        available[ch] = available.get(ch, 0) + 1
 
-#     # Step 2: check concats (adjacent greens)
-#     for i, flag in enumerate(concats[:-1]):  # skip last
-#         if flag:
-#             g1 = guess[i]
-#             g2 = guess[i+1]
-#             # positions in candidate
-#             pos1 = next((p for idx, p in enumerate(green_indices) if guess[idx]==g1), None)
-#             pos2 = next((p for idx, p in enumerate(green_indices) if guess[idx]==g2), None)
-#             if pos1 is None or pos2 is None:
-#                 return False
-#             if abs(pos2 - pos1) != 1:
-#                 return False
+    # ── Step 1: GREEN / BORDER – forward subsequence scan ─────────────────────
+    green_cand_pos: list[int] = []   # candidate index for each green, in order
+    green_guess_idx: list[int] = []  # corresponding guess index
+    ptr = 0
 
-#     # Step 3: check yellows
-#     for i, s in enumerate(states):
-#         if s == YELLOW:
-#             if gch := guess[i]:
-#                 if available.get(gch, 0) <= 0:
-#                     return False
-#                 # Cannot appear at same position as guess[i] if green
-#                 if candidate[i] == gch:
-#                     return False
-#                 available[gch] -= 1
+    for i, s in enumerate(states):
+        if s < GREEN:
+            continue
+        ch = guess[i]
+        # find next occurrence of ch in candidate from ptr
+        j = ptr
+        while j < L2 and candidate[j] != ch:
+            j += 1
+        if j == L2:
+            return False   # required letter not found in subsequence order
+        green_cand_pos.append(j)
+        green_guess_idx.append(i)
+        available[ch] -= 1
+        ptr = j + 1
 
-#     # Step 4: check blacks
-#     for i, s in enumerate(states):
-#         if s == BLACK:
-#             bch = guess[i]
-#             if available.get(bch, 0) > 0:
-#                 return False
+    # Verify BORDER positions
+    for k, i in enumerate(green_guess_idx):
+        pos = green_cand_pos[k]
+        if states[i] == BORDER:
+            if pos != 0 and pos != L2 - 1:
+                return False
 
-#     return True
+    # Verify CONCAT: concats[i] means guess[i] (green) and the next green
+    # in the guess must occupy consecutive positions in candidate.
+    for k in range(len(green_guess_idx) - 1):
+        gi = green_guess_idx[k]
+        if concats[gi]:
+            if green_cand_pos[k + 1] != green_cand_pos[k] + 1:
+                return False
 
-# def decode_pattern(pattern_int: int, length: int) -> tuple[list[int], list[bool]]:
-#     """Decode a pattern int into (states, concat_rights) for debugging."""
-#     states = []
-#     concats = []
-#     for _ in range(length):
-#         v = pattern_int % _BASE
-#         states.append(v // 2)
-#         concats.append(bool(v % 2))
-#         pattern_int //= _BASE
-#     return states, concats
+    # ── Step 2: YELLOW – letter must still be in the pool ─────────────────────
+    for i, s in enumerate(states):
+        if s != YELLOW:
+            continue
+        ch = guess[i]
+        if available.get(ch, 0) <= 0:
+            return False
+        available[ch] -= 1
+
+    # ── Step 3: BLACK – no remaining copies allowed ────────────────────────────
+    # Iterating over every BLACK position is fine: if a letter appears multiple
+    # times as BLACK and the pool is already 0, each check passes harmlessly.
+    for i, s in enumerate(states):
+        if s != BLACK:
+            continue
+        if available.get(guess[i], 0) > 0:
+            return False
+
+    return True
+
+def decode_pattern(pattern_int: int, length: int) -> tuple[list[int], list[bool]]:
+    """Decode a pattern int into (states, concat_rights) for debugging."""
+    states = []
+    concats = []
+    for _ in range(length):
+        v = pattern_int % _BASE
+        states.append(v // 2)
+        concats.append(bool(v % 2))
+        pattern_int //= _BASE
+    return states, concats
 
 
 def pattern_to_str(pattern_int: int, length: int) -> str:
@@ -188,9 +229,9 @@ def filter_candidates(
     pattern_int: int,
 ) -> list[str]:
     """Keep only words whose get_pattern(guess, word) equals pattern_int."""
-    return [w for w in candidates if get_pattern(guess, w) == pattern_int]
-    # states, concats = decode_pattern(pattern_int, len(guess))
-    # return [w for w in candidates if matches_feedback(guess, w, states, concats)]
+    # return [w for w in candidates if get_pattern(guess, w) == pattern_int]
+    states, concats = decode_pattern(pattern_int, len(guess))
+    return [w for w in candidates if matches_feedback(guess, w, states, concats)]
 
 def compute_entropy(
     guess: str,
