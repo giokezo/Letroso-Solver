@@ -214,11 +214,33 @@ def pattern_to_str(pattern_int: int, length: int) -> str:
 
 
 def is_win_pattern(pattern_int: int, length: int) -> bool:
-    """True if every position is GREEN or BORDER (state >= 2)."""
-    for _ in range(length):
+    """
+    True only for the exact win pattern  PO(GO)^N P:
+      - position 0        : BORDER, concat_right = True
+      - positions 1..L-2  : GREEN,  concat_right = True
+      - position L-1      : BORDER, concat_right = False
+
+    This means the guessed word spans the full target consecutively
+    from left border to right border (i.e. the guess IS the target).
+    Single-letter edge case: just BORDER with concat_right = False.
+    """
+    if length == 1:
         v = pattern_int % _BASE
-        if v // 2 < GREEN:
-            return False
+        return v // 2 == BORDER and not bool(v % 2)
+
+    for i in range(length):
+        v      = pattern_int % _BASE
+        state  = v // 2
+        concat = bool(v % 2)
+        if i == 0:
+            if state != BORDER or not concat:
+                return False
+        elif i == length - 1:
+            if state != BORDER or concat:
+                return False
+        else:
+            if state != GREEN or not concat:
+                return False
         pattern_int //= _BASE
     return True
 
