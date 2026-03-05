@@ -1,120 +1,186 @@
-"""
-engine.py
----------
-Core solver logic for Letroso.
-
-Feedback states per position (base-5 encoded):
-  BLACK          (0) — letter not in the answer
-  YELLOW         (1) — letter in the answer, wrong position
-  GREEN          (2) — exact position match (isolated — no adjacent GREEN)
-  GREEN_ADJACENT (3) — exact match AND at least one neighbour is also GREEN
-                        (the game draws a connection line between them)
-  GREEN_BORDER   (4) — exact match AND this position is the first or last
-                        position of the ANSWER word (rounded corners)
-
-Priority when multiple states apply:
-    GREEN_ADJACENT > GREEN_BORDER > GREEN
-
-Cross-length:
-  guess and answer may differ in length.
-  GREEN is only assigned at positions i < min(len(guess), len(answer)).
-  The pattern always has len(guess) positions.
-  GREEN_BORDER at position i means i == 0 (answer start) or i == len(answer)-1
-  (answer end), which lets the solver deduce the answer's length.
-"""
-
 import math
 from collections import defaultdict
 from functools import lru_cache
 from typing import Optional
 
-# ── Feedback state constants ──────────────────────────────────────────────────
-BLACK          = 0
-YELLOW         = 1
-GREEN          = 2
-GREEN_ADJACENT = 3   # connected to neighbouring green
-GREEN_BORDER   = 4   # at first/last position of the answer
+BLACK  = 0
+YELLOW = 1
+GREEN  = 2
+BORDER = 3
 
-_BASE = 5   # states per position
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Pattern computation
-# ──────────────────────────────────────────────────────────────────────────────
+_BASE = 8   # state*2 + concat_right  →  values 0–7
 
 @lru_cache(maxsize=8_000_000)
 def get_pattern(guess: str, answer: str) -> int:
-    """
-    Return the Letroso feedback pattern for (guess, answer) as a base-5 int.
-    Works for any combination of word lengths.
-    """
-    L1 = len(guess)
-    L2 = len(answer)
-    min_L = min(L1, L2)
+    L1, L2 = len(guess), len(answer)
 
-    pattern    = [BLACK] * L1
-    used_ans   = [False] * L2
-    used_guess = [False] * L1
+    available = {}
+    for ch in answer:
+        available[ch] = available.get(ch, 0) + 1
 
-    # ── Phase 1: greens (only at overlapping positions) ──────────────────────
-    for i in range(min_L):
-        if guess[i] == answer[i]:
-            pattern[i]    = GREEN
-            used_ans[i]   = True
-            used_guess[i] = True
+    state = [BLACK] * L1
+    ans_pos = {}
+    ans_used = [False] * L2
 
-    # ── Phase 2: yellows ─────────────────────────────────────────────────────
-    available: dict[str, int] = {}
-    for j in range(L2):
-        if not used_ans[j]:
-            available[answer[j]] = available.get(answer[j], 0) + 1
+    # ── LCS computation ─────────────────────────────
+    dp = [[0]*(L2+1) for _ in range(L1+1)]
 
-    avail = dict(available)
-    for i in range(L1):
-        if used_guess[i]:
+    for i in range(L1-1, -1, -1):
+        for j in range(L2-1, -1, -1):
+            if guess[i] == answer[j]:
+                dp[i][j] = 1 + dp[i+1][j+1]
+            else:
+                dp[i][j] = max(dp[i+1][j], dp[i][j+1])
+
+    i = j = 0
+    while i < L1 and j < L2:
+        if guess[i] == answer[j]:
+            state[i] = GREEN
+            ans_pos[i] = j
+            ans_used[j] = True
+            available[guess[i]] -= 1
+            i += 1
+            j += 1
+        elif dp[i+1][j] >= dp[i][j+1]:
+            i += 1
+        else:
+            j += 1
+
+    # ── Step 3: right-to-left yellow assignment ─────
+    for i in range(L1-1, -1, -1):
+        if state[i] == GREEN:
             continue
         ch = guess[i]
-        if avail.get(ch, 0) > 0:
-            pattern[i] = YELLOW
-            avail[ch] -= 1
+        if available.get(ch, 0) > 0:
+            state[i] = YELLOW
+            available[ch] -= 1
 
-    # ── Phase 3: upgrade GREEN → ADJACENT or BORDER ──────────────────────────
-    is_green = [pattern[i] == GREEN for i in range(L1)]
+    # ── Step 4: border upgrade ──────────────────────
+    for i, j in ans_pos.items():
+        if j == 0 or j == L2-1:
+            state[i] = BORDER
 
-    for i in range(L1):
-        if not is_green[i]:
-            continue
+    # ── Step 5: concatenation ───────────────────────
+    concat = [False] * L1
+    greens = sorted(ans_pos.keys())
 
-        has_adj = (
-            (i > 0     and is_green[i - 1]) or
-            (i < L1 - 1 and is_green[i + 1])
-        )
-        at_border = (i == 0) or (i == L2 - 1 and i < L1)
+    for k in range(len(greens)-1):
+        gi = greens[k]
+        gj = greens[k+1]
 
-        if has_adj:
-            pattern[i] = GREEN_ADJACENT
-        elif at_border:
-            pattern[i] = GREEN_BORDER
+        if gj == gi + 1:
+            if ans_pos[gj] == ans_pos[gi] + 1:
+                concat[gi] = True
 
-    # ── Encode base-6 ────────────────────────────────────────────────────────
+    # ── Encode pattern ──────────────────────────────
     result = 0
-    for i, v in enumerate(pattern):
+    for i in range(L1):
+        v = state[i]*2 + (1 if concat[i] else 0)
         result += v * (_BASE ** i)
+
     return result
+
+# def matches_feedback(
+#     guess: str,
+#     candidate: str,
+#     states: list[int],
+#     concats: list[bool],
+# ) -> bool:
+#     """
+#     Return True if candidate word is compatible with manual feedback (states + concats).
+#     Does NOT require exact pattern_int match from get_pattern.
+#     """
+#     # Step 0: sanity
+#     if len(guess) != len(candidate) or len(states) != len(guess):
+#         return False
+
+#     # Count available letters in candidate
+#     available = {}
+#     for ch in candidate:
+#         available[ch] = available.get(ch, 0) + 1
+
+#     # Step 1: check greens / borders
+#     green_indices = []
+#     for i, s in enumerate(states):
+#         gch = guess[i]
+#         if s >= GREEN:
+#             # Must appear somewhere in candidate, respecting order for green
+#             found = False
+#             for j, cch in enumerate(candidate):
+#                 if cch == gch and (j not in green_indices):
+#                     green_indices.append(j)
+#                     available[cch] -= 1
+#                     found = True
+#                     break
+#             if not found:
+#                 return False
+
+#     # Step 2: check concats (adjacent greens)
+#     for i, flag in enumerate(concats[:-1]):  # skip last
+#         if flag:
+#             g1 = guess[i]
+#             g2 = guess[i+1]
+#             # positions in candidate
+#             pos1 = next((p for idx, p in enumerate(green_indices) if guess[idx]==g1), None)
+#             pos2 = next((p for idx, p in enumerate(green_indices) if guess[idx]==g2), None)
+#             if pos1 is None or pos2 is None:
+#                 return False
+#             if abs(pos2 - pos1) != 1:
+#                 return False
+
+#     # Step 3: check yellows
+#     for i, s in enumerate(states):
+#         if s == YELLOW:
+#             if gch := guess[i]:
+#                 if available.get(gch, 0) <= 0:
+#                     return False
+#                 # Cannot appear at same position as guess[i] if green
+#                 if candidate[i] == gch:
+#                     return False
+#                 available[gch] -= 1
+
+#     # Step 4: check blacks
+#     for i, s in enumerate(states):
+#         if s == BLACK:
+#             bch = guess[i]
+#             if available.get(bch, 0) > 0:
+#                 return False
+
+#     return True
+
+# def decode_pattern(pattern_int: int, length: int) -> tuple[list[int], list[bool]]:
+#     """Decode a pattern int into (states, concat_rights) for debugging."""
+#     states = []
+#     concats = []
+#     for _ in range(length):
+#         v = pattern_int % _BASE
+#         states.append(v // 2)
+#         concats.append(bool(v % 2))
+#         pattern_int //= _BASE
+#     return states, concats
+
+
+def pattern_to_str(pattern_int: int, length: int) -> str:
+    """Convert a pattern int to human-readable feedback string."""
+    states, concats = decode_pattern(pattern_int, length)
+    _MAP = {BLACK: "B", YELLOW: "Y", GREEN: "G", BORDER: "P"}
+    parts = []
+    for i in range(length):
+        parts.append(_MAP[states[i]])
+        if concats[i] and i < length - 1:
+            parts.append("O")
+    return "".join(parts)
 
 
 def is_win_pattern(pattern_int: int, length: int) -> bool:
-    """True if every position is a GREEN variant (≥ 2)."""
+    """True if every position is GREEN or BORDER (state >= 2)."""
     for _ in range(length):
-        if pattern_int % _BASE < GREEN:
+        v = pattern_int % _BASE
+        if v // 2 < GREEN:
             return False
         pattern_int //= _BASE
     return True
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Filtering
-# ──────────────────────────────────────────────────────────────────────────────
 
 def filter_candidates(
     candidates: list[str],
@@ -123,11 +189,8 @@ def filter_candidates(
 ) -> list[str]:
     """Keep only words whose get_pattern(guess, word) equals pattern_int."""
     return [w for w in candidates if get_pattern(guess, w) == pattern_int]
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Entropy
-# ──────────────────────────────────────────────────────────────────────────────
+    # states, concats = decode_pattern(pattern_int, len(guess))
+    # return [w for w in candidates if matches_feedback(guess, w, states, concats)]
 
 def compute_entropy(
     guess: str,
@@ -138,11 +201,11 @@ def compute_entropy(
     if total == 0:
         return 0.0
 
-    bucket_prob: dict[int, float] = defaultdict(float)
+    bucket: dict[int, float] = defaultdict(float)
     for answer in candidates:
-        bucket_prob[get_pattern(guess, answer)] += weights[answer] / total
+        bucket[get_pattern(guess, answer)] += weights[answer] / total
 
-    return -sum(p * math.log2(p) for p in bucket_prob.values() if p > 0)
+    return -sum(p * math.log2(p) for p in bucket.values() if p > 0)
 
 
 def rank_guesses(
@@ -154,8 +217,7 @@ def rank_guesses(
 ) -> list[tuple[str, float]]:
     """
     Return top-n guesses by descending entropy.
-    When ≤ 20 candidates remain, only rank those (O(20²) instead of O(V·20)).
-
+    When ≤ 20 candidates remain, only rank those.
     progress_fn(done, total) is called periodically if provided.
     """
     candidate_set = set(candidates)
@@ -172,45 +234,55 @@ def rank_guesses(
     return results[:top_n]
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Pattern parsing (user / API input)
-# ──────────────────────────────────────────────────────────────────────────────
-
 _CHAR_MAP = {
-    # Letters
-    "B": BLACK,          
-    "Y": YELLOW,          
-    "G": GREEN,           
-    "A": GREEN_ADJACENT,
-    "P": GREEN_BORDER,    
-    # Digits
-    "0": BLACK,
-    "1": YELLOW,
-    "2": GREEN,
-    "3": GREEN_ADJACENT,
-    "4": GREEN_BORDER,
+    "B": BLACK,   "0": BLACK,
+    "Y": YELLOW,  "1": YELLOW,
+    "G": GREEN,   "2": GREEN,
+    "P": BORDER,  "3": BORDER,
 }
 
 
 def parse_pattern(feedback: str, length: int) -> Optional[int]:
     """
-    Parse a feedback string into a base-5 pattern int.
+    Parse a feedback string into a base-8 pattern int.
 
-    Accepted formats (case-insensitive, spaces optional):
-      "GAPB"      — letter codes (B=black Y=yellow G=green A=adjacent P=border)
-      "2 3 4 0"   — numeric spaced
-      "2340"      — numeric compact
+    Accepted tokens:
+      B/0 = black,  Y/1 = yellow,  G/2 = green,  P/3 = border,  O = concat
+    Formats: "BGOGOGB", "BGYGB", "0 2 O 2 O 2 0", etc.
     Returns None if the input is invalid.
     """
     feedback = feedback.strip().upper()
-    tokens   = feedback.split() if " " in feedback else list(feedback)
+    tokens = list(feedback.replace(" ", ""))
 
-    if len(tokens) != length:
+    states: list[int] = []
+    concat: list[bool] = []
+
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "O":
+            if not states:
+                return None      # O at start
+            if states[-1] < GREEN:
+                return None      # O after non-green
+            concat[-1] = True
+            i += 1
+            continue
+        if tok in _CHAR_MAP:
+            # If previous position had concat, verify this is green-type
+            if concat and concat[-1] and _CHAR_MAP[tok] < GREEN:
+                return None      # O before non-green
+            states.append(_CHAR_MAP[tok])
+            concat.append(False)
+            i += 1
+        else:
+            return None
+
+    if len(states) != length:
         return None
 
     result = 0
-    for i, tok in enumerate(tokens):
-        if tok not in _CHAR_MAP:
-            return None
-        result += _CHAR_MAP[tok] * (_BASE ** i)
+    for i in range(length):
+        v = states[i] * 2 + (1 if concat[i] else 0)
+        result += v * (_BASE ** i)
     return result

@@ -1,38 +1,15 @@
-"""
-solver.py
----------
-Interactive CLI solver for Letroso.
-
-Usage:
-    python solver.py
-
-Workflow:
-    1. Solver suggests a word
-    2. You enter it in Letroso and type the feedback (e.g. "1224")
-    3. Solver narrows candidates and suggests the next word
-    4. Repeat until solved
-
-Feedback codes:
-    0 / B  = grey   (letter not in word)
-    1 / Y  = yellow (letter in word, wrong position)
-    2 / G  = green  (correct position, isolated)
-    3 / A  = green  (connected — adjacent to another green)
-    4 / P  = green  (border — rounded corners, first/last letter of answer)
-
-The solver does not know the answer's length — it works across the entire
-3–10 letter vocabulary and deduces the length from feedback.
-"""
-
 import json
 import os
 import sys
 import time
 
 from engine import (
+    decode_pattern,
     filter_candidates,
     is_win_pattern,
     parse_pattern,
     rank_guesses,
+    BLACK, YELLOW, GREEN, BORDER,
 )
 
 BASE_DIR           = os.path.dirname(__file__)
@@ -66,6 +43,29 @@ def _progress(done: int, total: int) -> None:
     print(f"\r  Computing best guess... ({done:,}/{total:,})", end="", flush=True)
 
 
+def _validate_feedback(
+    guess: str,
+    states: list[int],
+    known_absent: set[str],
+    known_present: set[str],
+) -> str | None:
+    """
+    Validate feedback against cross-turn knowledge.
+    Returns an error message, or None if valid.
+    """
+    for i, s in enumerate(states):
+        ch = guess[i]
+        if s >= GREEN and ch in known_absent:
+            return (
+                f"  '{ch}' was BLACK in a previous turn but marked as "
+                f"{'green' if s == GREEN else 'border'} now.  Please re-enter."
+            )
+        if s == BLACK and ch in known_present:
+            # This is OK — could be an excess duplicate.  Don't block.
+            pass
+    return None
+
+
 def main() -> None:
     print("Loading vocabulary...")
     vocab, weights = load_data()
@@ -74,10 +74,16 @@ def main() -> None:
     candidates = list(vocab)
     turn = 0
 
+    # Cross-turn memory
+    known_absent:  set[str] = set()   # letters confirmed not in answer
+    known_present: set[str] = set()   # letters confirmed in answer
+    all_black_letters: dict[str, int] = {}   # letter → count of all-black turns
+    letter_ever_nonblack: set[str] = set()
+
     print(f"Vocabulary: {len(vocab):,} words (lengths 3–10)")
     print()
-    print("Feedback codes:")
-    print("  0/B=grey  1/Y=yellow  2/G=green  3/A=connected  4/P=border")
+    print("Feedback: B=black Y=yellow G=green P=border O=concat")
+    print("  e.g. BGYGB or BGOGOGB")
     print()
 
     while True:
@@ -122,15 +128,25 @@ def main() -> None:
 
             pattern_int = parse_pattern(raw, len(guess))
             if pattern_int is None:
-                print(f"  Invalid.  Enter {len(guess)} codes: 0-4 or B/Y/G/A/P")
+                print(f"  Invalid format.  Use B/Y/G/P (with O between greens).")
                 continue
 
-            # ── Win check ────────────────────────────────────────────────────
+            # Decode for validation
+            states, concats = decode_pattern(pattern_int, len(guess))
+
+            # Cross-turn validation
+            err = _validate_feedback(guess, states, known_absent, known_present)
+            if err:
+                print(err)
+                continue
+
+            # Win check
             if is_win_pattern(pattern_int, len(guess)):
                 print(f"\n  Solved in {turn} turn{'s' if turn > 1 else ''}!  Answer: {guess}")
+                # Update memory before returning
                 return
 
-            # ── Filter ───────────────────────────────────────────────────────
+            # Filter candidates
             old_count = len(candidates)
             new_candidates = filter_candidates(candidates, guess, pattern_int)
 
@@ -140,6 +156,21 @@ def main() -> None:
 
             candidates = new_candidates
             print(f"  {old_count:,} → {len(candidates):,} candidates")
+
+            # ── Update cross-turn memory ─────────────────────────────────────
+            for i, s in enumerate(states):
+                ch = guess[i]
+                if s >= GREEN or s == YELLOW:
+                    letter_ever_nonblack.add(ch)
+                    known_present.add(ch)
+
+            # A letter is confirmed absent only if EVERY occurrence across
+            # ALL turns was BLACK (and it was never non-black)
+            for i, s in enumerate(states):
+                ch = guess[i]
+                if s == BLACK and ch not in letter_ever_nonblack:
+                    known_absent.add(ch)
+
             break
 
 

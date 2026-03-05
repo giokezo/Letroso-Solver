@@ -1,14 +1,3 @@
-"""
-download_words.py
------------------
-Fetches the Letroso English word list directly from their JavaScript bundle,
-frequency-encodes each word using wordfreq corpus data, and saves the result
-as a single flat dict {word: frequency} sorted alphabetically to data/words.json.
-
-Usage:
-    python download_words.py
-"""
-
 import json
 import os
 import re
