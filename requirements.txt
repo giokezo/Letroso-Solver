@@ -1,0 +1,6 @@
+requests
+wordfreq
+rich
+numpy
+fastapi
+uvicorn[standard]
