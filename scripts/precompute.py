@@ -19,14 +19,9 @@ try:
 except (AttributeError, PermissionError):
     pass
 
-DATA_FILE  = os.path.join(os.path.dirname(__file__), "data", "words.json")
-OUT_FILE   = os.path.join(os.path.dirname(__file__), "data", "first_guesses.json")
+DATA_FILE  = os.path.join(os.path.dirname(__file__), "..","data", "words.json")
+OUT_FILE   = os.path.join(os.path.dirname(__file__), "..","data", "first_guesses.json")
 CHUNK_SIZE = 300
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Chunk worker
-# ──────────────────────────────────────────────────────────────────────────────
 
 def _chunk_worker(args: tuple) -> tuple[str, float, int]:
     """
@@ -73,11 +68,6 @@ def _chunk_worker(args: tuple) -> tuple[str, float, int]:
             best_word = guess
 
     return best_word, best_ent, C
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Main
-# ──────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     if not os.path.exists(DATA_FILE):

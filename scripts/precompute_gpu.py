@@ -22,15 +22,11 @@ except Exception as exc:
 
 from engine import get_pattern
 
-DATA_FILE = os.path.join(os.path.dirname(__file__), "data", "words.json")
-OUT_FILE  = os.path.join(os.path.dirname(__file__), "data", "first_guesses.json")
+DATA_FILE = os.path.join(os.path.dirname(__file__), "..","data", "words.json")
+OUT_FILE  = os.path.join(os.path.dirname(__file__), "..","data", "first_guesses.json")
 
 CHUNK_SIZE_GPU = 500
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Main
-# ──────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     if not os.path.exists(DATA_FILE):

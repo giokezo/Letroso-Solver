@@ -3,9 +3,6 @@ from collections import defaultdict
 from functools import lru_cache
 from typing import Optional
 
-import multiprocessing as mp
-import os
-
 BLACK  = 0
 YELLOW = 1
 GREEN  = 2
@@ -218,19 +215,15 @@ def pattern_to_str(pattern_int: int, length: int) -> str:
 
 def is_win_pattern(pattern_int: int, length: int) -> bool:
     """
-    True only for the exact win pattern  PO(GO)^N P:
-      - position 0        : BORDER, concat_right = True
-      - positions 1..L-2  : GREEN,  concat_right = True
-      - position L-1      : BORDER, concat_right = False
+    True only for the exact win pattern  PO(GO)^NP:
+      - position 0        : BORDER, concat = True
+      - positions 1..L-2  : GREEN,  concat = True
+      - position L-1      : BORDER, concat = True  (both borders part of the chain)
 
-    This means the guessed word spans the full target consecutively
-    from left border to right border (i.e. the guess IS the target).
-    Single-letter edge case: just BORDER with concat_right = False.
+    The trailing O on the last BORDER is not shown in the string representation
+    (pattern_to_str suppresses it), so the string still looks like "POGOP".
+    Single-letter edge case: BORDER with concat = True.
     """
-    if length == 1:
-        v = pattern_int % _BASE
-        return v // 2 == BORDER and not bool(v % 2)
-
     for i in range(length):
         v      = pattern_int % _BASE
         state  = v // 2
@@ -239,7 +232,7 @@ def is_win_pattern(pattern_int: int, length: int) -> bool:
             if state != BORDER or not concat:
                 return False
         elif i == length - 1:
-            if state != BORDER or concat:
+            if state != BORDER:   # concat not checked: parse_pattern won't set it
                 return False
         else:
             if state != GREEN or not concat:
@@ -274,35 +267,6 @@ def compute_entropy(
     return -sum(p * math.log2(p) for p in bucket.values() if p > 0)
 
 
-# Per-worker globals set by the pool initializer (avoids re-serializing
-# candidates and weights for every chunk).
-_worker_candidates: list[str] = []
-_worker_weights:    dict[str, float] = {}
-_worker_total:      float = 0.0
-
-
-def _worker_init(candidates: list[str], weights: dict[str, float]) -> None:
-    global _worker_candidates, _worker_weights, _worker_total
-    _worker_candidates = candidates
-    _worker_weights    = weights
-    _worker_total      = sum(weights[w] for w in candidates)
-
-
-def _entropy_worker(chunk: list[str]) -> list[tuple[str, float]]:
-    """Compute entropy for each guess in chunk against the shared candidate set."""
-    results = []
-    total = _worker_total
-    if total == 0:
-        return [(g, 0.0) for g in chunk]
-    for g in chunk:
-        bucket: dict[int, float] = defaultdict(float)
-        for answer in _worker_candidates:
-            bucket[get_pattern(g, answer)] += _worker_weights[answer] / total
-        ent = -sum(p * math.log2(p) for p in bucket.values() if p > 0)
-        results.append((g, ent))
-    return results
-
-
 def rank_guesses(
     candidates: list[str],
     vocab: list[str],
@@ -312,49 +276,19 @@ def rank_guesses(
 ) -> list[tuple[str, float]]:
     """
     Return top-n guesses by descending entropy.
-    When ≤ 500 candidates remain, only rank candidates (much faster).
-    Uses multiprocessing; candidates+weights are sent once per worker
-    via an initializer instead of being re-pickled for every chunk.
+    When ≤ 20 candidates remain, only rank those.
+    progress_fn(done, total) is called periodically if provided.
     """
-
     candidate_set = set(candidates)
-    # Always guess from the remaining candidates — any of them could be the answer,
-    # and guessing from outside that set rarely helps enough to justify the cost.
-    search_space = candidates
-    total        = len(search_space)
-
-    # Single-threaded for small search spaces
-    if total <= 200:
-        results: list[tuple[str, float]] = []
-        for i, g in enumerate(search_space):
-            results.append((g, compute_entropy(g, candidates, weights)))
-            if progress_fn and (i + 1) % 50 == 0:
-                progress_fn(i + 1, total)
-        if progress_fn:
-            progress_fn(total, total)
-        results.sort(key=lambda x: (x[1], x[0] in candidate_set), reverse=True)
-        return results[:top_n]
-
-    # Split into many small chunks for frequent progress updates.
-    # Each chunk is just a list[str] — candidates/weights go via initializer.
-    n_workers  = os.cpu_count() or 4
-    chunk_size = max(1, total // (n_workers * 10))
-    chunks     = [search_space[i:i + chunk_size] for i in range(0, total, chunk_size)]
-
+    search_space  = candidates if len(candidates) <= 20 else vocab
+    total = len(search_space)
+    results: list[tuple[str, float]] = []
+    for i, g in enumerate(search_space):
+        results.append((g, compute_entropy(g, candidates, weights)))
+        if progress_fn and (i + 1) % 500 == 0:
+            progress_fn(i + 1, total)
     if progress_fn:
-        progress_fn(0, total)
-
-    results = []
-    with mp.Pool(
-        n_workers,
-        initializer=_worker_init,
-        initargs=(candidates, weights),
-    ) as pool:
-        for chunk_results in pool.imap_unordered(_entropy_worker, chunks):
-            results.extend(chunk_results)
-            if progress_fn:
-                progress_fn(min(len(results), total), total)
-
+        progress_fn(total, total)
     results.sort(key=lambda x: (x[1], x[0] in candidate_set), reverse=True)
     return results[:top_n]
 

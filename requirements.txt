@@ -1,5 +1,6 @@
 requests
 wordfreq
+selenium
 rich
 numpy
 fastapi
