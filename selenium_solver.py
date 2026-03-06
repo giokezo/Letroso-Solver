@@ -19,7 +19,7 @@ from engine import (
 from solver import load_data, load_first_guess
 
 BASE_DIR = os.path.dirname(__file__)
-LOG_FILE = os.path.join(BASE_DIR, "solve_log.csv")
+LOG_FILE = os.path.join(BASE_DIR, "data","solve_log.csv")
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -36,6 +36,12 @@ def log_result(answer: str, turns: int, guesses: list[str]):
         guess_list = " -> ".join(guesses)
         f.write(f"{ts},{answer},{turns},{guess_list}\n")
 
+# def log_result(answer: str, turns: int, guesses: list[tuple[str, str]]):
+#     """guesses is a list of (word, feedback) pairs."""
+#     with open(LOG_FILE, "a") as f:
+#         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+#         guess_list = " -> ".join(f"{w}({fb})" for w, fb in guesses)
+#         f.write(f"{ts},{answer},{turns},{guess_list}\n")
 
 # ── Selenium helpers ──────────────────────────────────────────────────────────
 
@@ -123,7 +129,9 @@ def read_feedback(driver: webdriver.Firefox, guess_index: int) -> str:
     for i, classes in enumerate(letter_info):
         if "absent" in classes:
             code = "B"
-        elif "present" in classes or "one-present" in classes:
+        elif "one-present" in classes:
+            code = "G"
+        elif "present" in classes:
             code = "Y"
         elif "start" in classes or "end" in classes:
             code = "P"

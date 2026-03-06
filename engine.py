@@ -25,7 +25,7 @@ def get_pattern(guess: str, answer: str) -> int:
     ans_pos = {}  # guess index → answer index for green matches
     ans_used = [False] * L2
 
-    # ── Step 1: find the GREEN subsequence ───────────────────────────────────
+    # Step 1: find the GREEN subsequence
     # Priority order for choosing among multiple LCS of equal length:
     #   1. Most consecutive pairs (adjacent in BOTH guess and answer simultaneously)
     #   2. Earliest start in the sequence
@@ -77,10 +77,21 @@ def get_pattern(guess: str, answer: str) -> int:
             else:
                 j += 1
 
-    # ── Step 2: non-green positions → YELLOW or BLACK (right-to-left) ────────
-    # Rightmost non-green positions get YELLOW first; leftmost excess → BLACK.
-    # ("excess copies get BLACK from the left")
-    for i in range(L1 - 1, -1, -1):
+    # Step 1b: discard isolated single green unless it's a both-boundary match
+    # The game only shows GREEN/BORDER for a letter when the LCS has length >= 2,
+    # OR the single match lands at position 0 of both strings simultaneously,
+    # OR at the last position of both strings simultaneously.
+    if len(ans_pos) < 2:
+        for i, j in list(ans_pos.items()):
+            at_both = (i == 0 and j == 0) or (i == L1 - 1 and j == L2 - 1)
+            if not at_both:
+                state[i] = BLACK
+                available[guess[i]] += 1
+                del ans_pos[i]
+
+    # Step 2: non-green positions → YELLOW or BLACK (left-to-right)
+    # Leftmost non-green positions get YELLOW first; rightmost excess → BLACK.
+    for i in range(L1):
         if state[i] == GREEN:
             continue
         ch = guess[i]
@@ -88,12 +99,14 @@ def get_pattern(guess: str, answer: str) -> int:
             state[i] = YELLOW
             available[ch] -= 1
 
-    # ── Step 3: upgrade GREEN → BORDER at answer boundaries ──────────────────
+    # Step 3: upgrade GREEN → BORDER at BOTH-boundary matches only
+    # BORDER only when the green lands at position 0 of BOTH guess and target,
+    # OR at the last position of BOTH simultaneously.
     for i, j in ans_pos.items():
-        if j == 0 or j == L2 - 1:
+        if (i == 0 and j == 0) or (i == L1 - 1 and j == L2 - 1):
             state[i] = BORDER
 
-    # ── Step 4: concatenation between adjacent GREEN/BORDER pairs ─────────────
+    # Step 4: concatenation between adjacent GREEN/BORDER pairs
     concat     = [False] * L1
     green_list = sorted(ans_pos.keys())
     for k in range(len(green_list) - 1):
@@ -102,7 +115,7 @@ def get_pattern(guess: str, answer: str) -> int:
         if gj == gi + 1 and ans_pos[gj] == ans_pos[gi] + 1:
             concat[gi] = True
 
-    # ── Encode ────────────────────────────────────────────────────────────────
+    # Encode
     result = 0
     for i in range(L1):
         v = state[i] * 2 + (1 if concat[i] else 0)
@@ -137,7 +150,7 @@ def matches_feedback(
     for ch in candidate:
         available[ch] = available.get(ch, 0) + 1
 
-    # ── Step 1: GREEN / BORDER – forward subsequence scan ─────────────────────
+    # Step 1: GREEN / BORDER – forward subsequence scan
     green_cand_pos: list[int] = []   # candidate index for each green, in order
     green_guess_idx: list[int] = []  # corresponding guess index
     ptr = 0
@@ -172,7 +185,7 @@ def matches_feedback(
             if green_cand_pos[k + 1] != green_cand_pos[k] + 1:
                 return False
 
-    # ── Step 2: YELLOW – letter must still be in the pool ─────────────────────
+    # Step 2: YELLOW – letter must still be in the pool
     for i, s in enumerate(states):
         if s != YELLOW:
             continue
@@ -181,7 +194,7 @@ def matches_feedback(
             return False
         available[ch] -= 1
 
-    # ── Step 3: BLACK – no remaining copies allowed ────────────────────────────
+    # Step 3: BLACK – no remaining copies allowed
     # Iterating over every BLACK position is fine: if a letter appears multiple
     # times as BLACK and the pool is already 0, each check passes harmlessly.
     for i, s in enumerate(states):
@@ -254,9 +267,9 @@ def filter_candidates(
     pattern_int: int,
 ) -> list[str]:
     """Keep only words whose get_pattern(guess, word) equals pattern_int."""
-    # return [w for w in candidates if get_pattern(guess, w) == pattern_int]
-    states, concats = decode_pattern(pattern_int, len(guess))
-    return [w for w in candidates if matches_feedback(guess, w, states, concats)]
+    return [w for w in candidates if get_pattern(guess, w) == pattern_int]
+    # states, concats = decode_pattern(pattern_int, len(guess))
+    # return [w for w in candidates if matches_feedback(guess, w, states, concats)]
 
 def compute_entropy(
     guess: str,
@@ -323,17 +336,17 @@ def rank_guesses(
     search_space = candidates
     total        = len(search_space)
 
-    # Single-threaded for small search spaces
-    if total <= 200:
-        results: list[tuple[str, float]] = []
-        for i, g in enumerate(search_space):
-            results.append((g, compute_entropy(g, candidates, weights)))
-            if progress_fn and (i + 1) % 50 == 0:
-                progress_fn(i + 1, total)
-        if progress_fn:
-            progress_fn(total, total)
-        results.sort(key=lambda x: (x[1], x[0] in candidate_set), reverse=True)
-        return results[:top_n]
+    # # Single-threaded for small search spaces
+    # if total <= 200:
+    #     results: list[tuple[str, float]] = []
+    #     for i, g in enumerate(search_space):
+    #         results.append((g, compute_entropy(g, candidates, weights)))
+    #         if progress_fn and (i + 1) % 50 == 0:
+    #             progress_fn(i + 1, total)
+    #     if progress_fn:
+    #         progress_fn(total, total)
+    #     results.sort(key=lambda x: (x[1], x[0] in candidate_set), reverse=True)
+    #     return results[:top_n]
 
     # Split into many small chunks for frequent progress updates.
     # Each chunk is just a list[str] — candidates/weights go via initializer.
