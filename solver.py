@@ -66,30 +66,20 @@ def _validate_feedback(
     return None
 
 
-def main() -> None:
-    print("Loading vocabulary...")
-    vocab, weights = load_data()
-    first = load_first_guess()
-
+def _play_game(vocab: list[str], weights: dict[str, float], first) -> bool:
+    """Play one game. Returns False if the user wants to quit."""
     candidates = list(vocab)
     turn = 0
 
     # Cross-turn memory
-    known_absent:  set[str] = set()   # letters confirmed not in answer
-    known_present: set[str] = set()   # letters confirmed in answer
-    all_black_letters: dict[str, int] = {}   # letter → count of all-black turns
+    known_absent:  set[str] = set()
+    known_present: set[str] = set()
     letter_ever_nonblack: set[str] = set()
-
-    print(f"Vocabulary: {len(vocab):,} words (lengths 3–10)")
-    print()
-    print("Feedback: B=black Y=yellow G=green P=border O=concat")
-    print("  e.g. BGYGB or BGOGOGB")
-    print()
 
     while True:
         turn += 1
 
-        # ── Pick guess ───────────────────────────────────────────────────────
+        # Pick guess
         if turn == 1 and first:
             guess, entropy = first
             print(f"Turn {turn}  |  candidates: {len(candidates):,}")
@@ -98,10 +88,10 @@ def main() -> None:
             guess = candidates[0]
             print(f"Turn {turn}  |  candidates: 1")
             print(f"  Answer: {guess}")
-            break
+            return True
         elif len(candidates) == 0:
             print("No candidates remain — feedback may have been incorrect.")
-            break
+            return True
         else:
             print(f"Turn {turn}  |  candidates: {len(candidates):,}")
             t0 = time.time()
@@ -111,20 +101,20 @@ def main() -> None:
             guess, entropy = ranked[0]
             print(f"\r  Guess: {guess}  ({entropy:.4f} bits)  [{elapsed:.1f}s]")
             if len(ranked) > 1:
-                alts = ", ".join(f"{w} ({e:.2f})" for w, e in ranked[1:])
+                alts = ", ".join(f"{w} ({e:.4f})" for w, e in ranked[1:])
                 print(f"  Also good: {alts}")
 
-        # ── Get feedback ─────────────────────────────────────────────────────
+        # Get feedback
         while True:
             try:
                 raw = input(f"\n  Feedback for '{guess}': ").strip()
             except (EOFError, KeyboardInterrupt):
                 print("\nBye!")
-                return
+                return False
 
             if raw.lower() in ("q", "quit", "exit"):
                 print("Bye!")
-                return
+                return False
 
             pattern_int = parse_pattern(raw, len(guess))
             if pattern_int is None:
@@ -143,8 +133,7 @@ def main() -> None:
             # Win check
             if is_win_pattern(pattern_int, len(guess)):
                 print(f"\n  Solved in {turn} turn{'s' if turn > 1 else ''}!  Answer: {guess}")
-                # Update memory before returning
-                return
+                return True
 
             # Filter candidates
             old_count = len(candidates)
@@ -157,7 +146,7 @@ def main() -> None:
             candidates = new_candidates
             print(f"  {old_count:,} → {len(candidates):,} candidates")
 
-            # ── Update cross-turn memory ─────────────────────────────────────
+            # Update cross-turn memory
             for i, s in enumerate(states):
                 ch = guess[i]
                 if s >= GREEN or s == YELLOW:
@@ -172,6 +161,38 @@ def main() -> None:
                     known_absent.add(ch)
 
             break
+
+
+def main() -> None:
+    print("Loading vocabulary...")
+    vocab, weights = load_data()
+    first = load_first_guess()
+
+    print(f"Vocabulary: {len(vocab):,} words (lengths 3–10)")
+    print()
+    print("Feedback: B=black Y=yellow G=green P=border O=concat")
+    print("  e.g. BGYGB or BGOGOGB  |  q to quit")
+    print()
+
+    game = 0
+    while True:
+        game += 1
+        print(f"{'─'*40}")
+        print(f"Game {game}")
+        print(f"{'─'*40}")
+        keep_going = _play_game(vocab, weights, first)
+        if not keep_going:
+            break
+        print()
+        try:
+            again = input("Play again? [Y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if again in ("n", "no", "q", "quit"):
+            print("Bye!")
+            break
+        print()
 
 
 if __name__ == "__main__":

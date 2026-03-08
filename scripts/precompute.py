@@ -1,8 +1,14 @@
 import json
 import math
 import os
+import sys
 import time
+import numpy as np
+
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from engine import get_pattern
 
 # Limit numpy internal threading BEFORE importing numpy
 _CPU_COUNT   = os.cpu_count() or 1
@@ -12,8 +18,6 @@ for _env in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
              "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
     os.environ[_env] = "1"
 
-import numpy as np
-
 try:
     os.nice(10)
 except (AttributeError, PermissionError):
@@ -21,40 +25,36 @@ except (AttributeError, PermissionError):
 
 DATA_FILE  = os.path.join(os.path.dirname(__file__), "..","data", "words.json")
 OUT_FILE   = os.path.join(os.path.dirname(__file__), "..","data", "first_guesses.json")
-CHUNK_SIZE = 300
+CHUNK_SIZE = 50
 
-def _chunk_worker(args: tuple) -> tuple[str, float, int]:
-    """
-    Score a chunk of guess words against ALL answer words.
-    Returns (best_word, best_entropy, n_words_in_chunk).
+# Per-worker globals — set once via initializer instead of pickling into every task
+_worker_answers: list[str] = []
+_worker_weights: np.ndarray = np.empty(0)
+_worker_get_pattern = None
 
-    Uses engine.get_pattern directly (subsequence-based matching).
-    We bypass the lru_cache wrapper since every (guess, answer) pair
-    is unique in precompute and caching wastes memory.
-    """
-    chunk_words, all_answers, all_weights_arr = args
 
-    # Import inside worker so each process gets its own copy
-    from engine import get_pattern
+def _worker_init(all_answers: list[str], all_weights_arr: np.ndarray) -> None:
+    global _worker_answers, _worker_weights, _worker_get_pattern
+    _worker_answers = all_answers
+    _worker_weights = all_weights_arr
+    _worker_get_pattern = get_pattern.__wrapped__
 
-    # Use the unwrapped function to avoid lru_cache overhead
-    _get_pattern = get_pattern.__wrapped__
 
-    C = len(chunk_words)
-    A = len(all_answers)
+def _chunk_worker(chunk_words: list[str]) -> tuple[str, float, int]:
+    """Score a chunk of guess words against ALL answer words (shared via initializer)."""
+    all_answers     = _worker_answers
+    all_weights_arr = _worker_weights
+    _get_pattern    = _worker_get_pattern
 
+    A         = len(all_answers)
     best_word = chunk_words[0]
     best_ent  = -1.0
+    pats      = np.empty(A, dtype=np.int32)
 
-    # Pre-allocate pattern array for bincount
-    pats = np.empty(A, dtype=np.int32)
-
-    for gi, guess in enumerate(chunk_words):
-        # Compute patterns for this guess against all answers
+    for guess in chunk_words:
         for ai, answer in enumerate(all_answers):
             pats[ai] = _get_pattern(guess, answer)
 
-        # Entropy via bincount
         max_pat = int(pats.max()) + 1
         bucket  = np.bincount(pats, weights=all_weights_arr, minlength=max_pat)
         probs   = bucket[bucket > 0]
@@ -67,7 +67,8 @@ def _chunk_worker(args: tuple) -> tuple[str, float, int]:
             best_ent  = ent
             best_word = guess
 
-    return best_word, best_ent, C
+    return best_word, best_ent, len(chunk_words)
+
 
 def main() -> None:
     if not os.path.exists(DATA_FILE):
@@ -88,26 +89,29 @@ def main() -> None:
         by_length[len(w)] = by_length.get(len(w), 0) + 1
     lengths = sorted(by_length.keys())
 
+    guess_words = [w for w in all_words if len(w) == 10]
+    n_guesses   = len(guess_words)
+    n_tasks     = math.ceil(n_guesses / CHUNK_SIZE)
+    chunks      = [guess_words[i:i + CHUNK_SIZE] for i in range(0, n_guesses, CHUNK_SIZE)]
+
     print(f"Vocabulary : {total_words:,} words  |  lengths: {lengths}")
-    print(f"Workers    : {_MAX_WORKERS} / {_CPU_COUNT} cores (70 %)  |  chunk: {CHUNK_SIZE}\n")
+    print(f"Guesses    : {n_guesses:,} length-10 words")
+    print(f"Workers    : {_MAX_WORKERS} / {_CPU_COUNT} cores |  chunk: {CHUNK_SIZE}  |  tasks: {n_tasks}")
+    print(f"Initialising workers (sending {total_words:,} words once each)...", flush=True)
 
-    # Build tasks: one per chunk of guess words
-    tasks: list[tuple] = []
-    for chunk_start in range(0, total_words, CHUNK_SIZE):
-        chunk_end   = min(chunk_start + CHUNK_SIZE, total_words)
-        chunk_words = all_words[chunk_start:chunk_end]
-        tasks.append((chunk_words, all_words, norm_w))
-
-    n_tasks = len(tasks)
-    print(f"Tasks      : {n_tasks} chunks to process\n")
-
-    global_best_word = all_words[0]
+    global_best_word = guess_words[0]
     global_best_ent  = -1.0
     processed        = 0
     t0               = time.time()
 
-    with ProcessPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-        futures = [pool.submit(_chunk_worker, task) for task in tasks]
+    with ProcessPoolExecutor(
+        max_workers=_MAX_WORKERS,
+        initializer=_worker_init,
+        initargs=(all_words, norm_w),
+    ) as pool:
+        print(f"Workers ready — submitting {n_tasks} chunks...\n", flush=True)
+
+        futures = [pool.submit(_chunk_worker, chunk) for chunk in chunks]
 
         for future in as_completed(futures):
             word, ent, n = future.result()
@@ -117,16 +121,15 @@ def main() -> None:
                 global_best_ent  = ent
                 global_best_word = word
 
-            pct     = processed / total_words * 100
+            pct     = processed / n_guesses * 100
             elapsed = time.time() - t0
+            eta     = (elapsed / processed * (n_guesses - processed)) if processed else 0
             print(
-                f"\r  {pct:5.1f}%  ({processed:,}/{total_words:,})  "
+                f"  {pct:5.1f}%  ({processed:,}/{n_guesses:,})  "
                 f"best: {global_best_word!r} ({global_best_ent:.4f} bits)  "
-                f"[{elapsed:.0f}s]",
-                end="", flush=True,
+                f"[{elapsed:.0f}s  ETA {eta:.0f}s]",
+                flush=True,
             )
-
-        print()  # newline after progress
 
     elapsed = time.time() - t0
     print(f"\n  100%  done in {elapsed:.1f}s")

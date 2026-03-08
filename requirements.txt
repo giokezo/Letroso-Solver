@@ -3,5 +3,6 @@ wordfreq
 selenium
 rich
 numpy
+pandas
 fastapi
 uvicorn[standard]

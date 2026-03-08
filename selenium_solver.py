@@ -22,8 +22,6 @@ BASE_DIR = os.path.dirname(__file__)
 LOG_FILE = os.path.join(BASE_DIR, "data","solve_log.csv")
 
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-
 def init_log():
     if not os.path.exists(LOG_FILE):
         with open(LOG_FILE, "w") as f:
@@ -37,7 +35,6 @@ def log_result(answer: str, turns: int, guesses: list[tuple[str, str]]):
         guess_list = " -> ".join(f"{w}({fb})" for w, fb in guesses)
         f.write(f"{ts},{answer},{turns},{guess_list}\n")
 
-# ── Selenium helpers ──────────────────────────────────────────────────────────
 
 def open_browser() -> webdriver.Firefox:
     options = webdriver.FirefoxOptions()
@@ -142,8 +139,6 @@ def read_feedback(driver: webdriver.Firefox, guess_index: int) -> str:
     return "".join(parts)
 
 
-# ── Single game ───────────────────────────────────────────────────────────────
-
 def solve_one(driver: webdriver.Firefox, vocab, weights, first) -> tuple[str | None, int, list[tuple[str, str]]]:
     """
     Play one round. Returns (answer, turns, list of (word, feedback) pairs).
@@ -225,8 +220,6 @@ def solve_one(driver: webdriver.Firefox, vocab, weights, first) -> tuple[str | N
         if len(candidates) <= 10:
             print(f"  Remaining: {', '.join(candidates)}")
 
-
-# ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main() -> None:
     init_log()

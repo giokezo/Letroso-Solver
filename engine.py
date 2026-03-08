@@ -2,6 +2,7 @@ import math
 from collections import defaultdict
 from functools import lru_cache
 from typing import Optional
+from collections import Counter
 
 import multiprocessing as mp
 import os
@@ -174,96 +175,6 @@ def get_pattern(guess: str, answer: str) -> int:
         v = state[i] * 2 + (1 if concat[i] else 0)
         result += v * (_BASE ** i)
     return result
-
-
-def matches_feedback(
-    guess: str,
-    candidate: str,
-    states: list[int],
-    concats: list[bool],
-) -> bool:
-    """
-    Return True if candidate is compatible with the given feedback.
-
-    Steps (in order, each consuming from the available letter pool):
-      1. GREEN/BORDER letters must appear as a left-to-right subsequence in
-         candidate.  BORDER letters must land at position 0 or len-1 of
-         candidate; CONCAT between two adjacent greens means their candidate
-         positions must be consecutive.
-      2. YELLOW letters must be present in the remaining pool (after greens
-         consumed their share).  In Letroso, yellow only means "present but
-         out of order relative to the green subsequence" — no position check.
-      3. BLACK letters must leave zero remaining copies in the pool (after
-         both greens and yellows have consumed theirs).  This correctly caps
-         the repetition count.
-    """
-    L2 = len(candidate)
-
-    # Available letter counts in candidate
-    available: dict[str, int] = {}
-    for ch in candidate:
-        available[ch] = available.get(ch, 0) + 1
-
-    # Step 1: GREEN / BORDER – forward subsequence scan
-    # Precompute green/BORDER (index, letter) and next letter for concat.
-    green_specs: list[tuple[int, str]] = [(i, guess[i]) for i, s in enumerate(states) if s >= GREEN]
-    green_cand_pos: list[int] = []
-    green_guess_idx: list[int] = []
-    ptr = 0
-
-    for k, (i, ch) in enumerate(green_specs):
-        next_ch = green_specs[k + 1][1] if k + 1 < len(green_specs) else None
-        need_concat = concats[i]
-        if need_concat and next_ch is not None:
-            # Must place at j so that candidate[j+1] == next_ch (next green is consecutive)
-            j = ptr
-            while j < L2 and (candidate[j] != ch or j + 1 >= L2 or candidate[j + 1] != next_ch):
-                j += 1
-        else:
-            j = ptr
-            while j < L2 and candidate[j] != ch:
-                j += 1
-        if j == L2:
-            return False
-        green_cand_pos.append(j)
-        green_guess_idx.append(i)
-        available[ch] -= 1
-        ptr = j + 1
-
-    # Verify BORDER positions
-    for k, i in enumerate(green_guess_idx):
-        pos = green_cand_pos[k]
-        if states[i] == BORDER:
-            if pos != 0 and pos != L2 - 1:
-                return False
-
-    # Verify CONCAT: concats[i] means guess[i] (green) and the next green
-    # in the guess must occupy consecutive positions in candidate.
-    for k in range(len(green_guess_idx) - 1):
-        gi = green_guess_idx[k]
-        if concats[gi]:
-            if green_cand_pos[k + 1] != green_cand_pos[k] + 1:
-                return False
-
-    # Step 2: YELLOW – letter must still be in the pool
-    for i, s in enumerate(states):
-        if s != YELLOW:
-            continue
-        ch = guess[i]
-        if available.get(ch, 0) <= 0:
-            return False
-        available[ch] -= 1
-
-    # Step 3: BLACK – no remaining copies allowed
-    # Iterating over every BLACK position is fine: if a letter appears multiple
-    # times as BLACK and the pool is already 0, each check passes harmlessly.
-    for i, s in enumerate(states):
-        if s != BLACK:
-            continue
-        if available.get(guess[i], 0) > 0:
-            return False
-
-    return True
 
 def decode_pattern(pattern_int: int, length: int) -> tuple[list[int], list[bool]]:
     """Decode a pattern int into (states, concat_rights) for debugging."""
