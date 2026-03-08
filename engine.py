@@ -90,7 +90,7 @@ def get_pattern(guess: str, answer: str) -> int:
                         break
 
             pat_str = "".join(str(x) for x in pat)
-            if score > best_score or (score == best_score and pat_str < best_pat_str):
+            if score > best_score or (score == best_score and pat_str > best_pat_str):
                 best_score = score
                 best_pat_str = pat_str
                 best_align = list(current)
