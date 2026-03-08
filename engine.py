@@ -15,104 +15,157 @@ _BASE = 8   # state*2 + concat_right  →  values 0–7
 
 @lru_cache(maxsize=8_000_000)
 def get_pattern(guess: str, answer: str) -> int:
+    """
+    Compute feedback pattern to match the site's JS algorithm exactly.
+
+    The site uses edit-distance DP (cost=0 for match, inf for mismatch, 1 for deletion),
+    equivalent to LCS. Enumerates ALL LCS alignments, scores each by
+    boundary_bonus + 3*consecutive_pairs, breaks ties by pattern.join() descending
+    (JS pattern values: 0=absent, 1=present/yellow, 2=head of green run, 3=tail).
+    After selecting the best alignment, applies LCS-min-1 and BORDER rules.
+    """
     L1, L2 = len(guess), len(answer)
 
-    available = {}
-    for ch in answer:
-        available[ch] = available.get(ch, 0) + 1
-
-    state = [BLACK] * L1
-    ans_pos = {}  # guess index → answer index for green matches
-    ans_used = [False] * L2
-
-    # Step 1: find the GREEN subsequence
-    # Priority order for choosing among multiple LCS of equal length:
-    #   1. Most consecutive pairs (adjacent in BOTH guess and answer simultaneously)
-    #   2. Earliest start in the sequence
-    #
-    # dp[i][j] = (L, C): best (LCS-length, consecutive-pairs) from position (i,j) onward.
-    # is_m[i][j]: True if the optimal alignment at (i,j) starts by matching guess[i]→answer[j].
-    # Boundary: dp[L1][*] = dp[*][L2] = (0,0), is_m boundary = False.
-
-    dp   = [[(0, 0)] * (L2 + 1) for _ in range(L1 + 1)]
-    is_m = [[False]   * (L2 + 1) for _ in range(L1 + 1)]
-
+    # LCS DP (bottom-right to top-left)
+    dp = [[0] * (L2 + 1) for _ in range(L1 + 1)]
     for i in range(L1 - 1, -1, -1):
         for j in range(L2 - 1, -1, -1):
-            skip_i = dp[i + 1][j]   # skip guess[i]
-            skip_j = dp[i][j + 1]   # skip answer[j]
-            # When skip_i == skip_j, prefer skip_j: keeps guess[i] available
-            # for an earlier match, satisfying the "starts earlier" tiebreak.
-            best_skip = skip_i if skip_i > skip_j else skip_j
-
             if guess[i] == answer[j]:
-                nL, nC = dp[i + 1][j + 1]
-                # +1 consecutive bonus if the very next optimal step is also
-                # an immediate (i+1 → j+1) match.
-                bonus     = 1 if is_m[i + 1][j + 1] else 0
-                match_val = (1 + nL, nC + bonus)
-                # Prefer match when tied with skip (achieves earliest start).
-                if match_val >= best_skip:
-                    dp[i][j]   = match_val
-                    is_m[i][j] = True
-                else:
-                    dp[i][j]   = best_skip
+                dp[i][j] = dp[i + 1][j + 1] + 1
             else:
-                dp[i][j] = best_skip
+                dp[i][j] = max(dp[i + 1][j], dp[i][j + 1])
+    lcs_len = dp[0][0]
 
-    # Traceback: follow is_m flags, tie-break toward earlier start.
-    i = j = 0
-    while i < L1 and j < L2:
-        if is_m[i][j]:
-            state[i]   = GREEN
-            ans_pos[i] = j
-            ans_used[j] = True
-            available[guess[i]] -= 1
-            i += 1
-            j += 1
-        else:
-            # When equal, prefer skip_j (same tiebreak as DP fill).
-            if dp[i + 1][j] > dp[i][j + 1]:
-                i += 1
-            else:
-                j += 1
+    # Enumerate all LCS alignments; find best by (score DESC, js_pattern_str DESC)
+    best_score = -1
+    best_pat_str = ""
+    best_align: list[tuple[int, int]] = []
 
-    # Step 1b: discard isolated single green unless it's a both-boundary match
-    # The game only shows GREEN/BORDER for a letter when the LCS has length >= 2,
-    # OR the single match lands at position 0 of both strings simultaneously,
-    # OR at the last position of both strings simultaneously.
-    if len(ans_pos) < 2:
-        for i, j in list(ans_pos.items()):
-            at_both = (i == 0 and j == 0) or (i == L1 - 1 and j == L2 - 1)
-            if not at_both:
-                state[i] = BLACK
-                available[guess[i]] += 1
-                del ans_pos[i]
+    def dfs(k: int, i: int, j: int, current: list[tuple[int, int]]) -> None:
+        nonlocal best_score, best_pat_str, best_align
+        if k == 0:
+            # Score: boundary bonuses + 3 per consecutive pair
+            score = 0
+            if current and current[0] == (0, 0):
+                score += 1
+            if current and current[-1] == (L1 - 1, L2 - 1):
+                score += 1
+            for m in range(len(current) - 1):
+                gi, gj = current[m]
+                ni, nj = current[m + 1]
+                if ni == gi + 1 and nj == gj + 1:
+                    score += 3
 
-    # Step 2: non-green positions → YELLOW or BLACK (left-to-right)
-    # Leftmost non-green positions get YELLOW first; rightmost excess → BLACK.
-    for i in range(L1):
-        if state[i] == GREEN:
+            # Build JS-style pattern [0=B,1=Y,2=head,3=tail] for lex comparison
+            green_d: dict[int, int] = {gi: gj for gi, gj in current}
+            pat = [0] * L1
+            for gi in green_d:
+                pat[gi] = 2  # head initially
+            gl = sorted(green_d)
+            for m in range(len(gl) - 1):
+                gi2, ni2 = gl[m], gl[m + 1]
+                if ni2 == gi2 + 1 and green_d[ni2] == green_d[gi2] + 1:
+                    pat[ni2] = 3  # tail
+
+            # Yellow assignment: build available pool after subtracting greens
+            avail_y: dict[str, int] = {}
+            for ch in answer:
+                avail_y[ch] = avail_y.get(ch, 0) + 1
+            for gj in green_d.values():
+                avail_y[answer[gj]] -= 1
+            used_y = [False] * L1
+            for j2 in range(L2):
+                if j2 in green_d.values():
+                    continue
+                ch = answer[j2]
+                if avail_y.get(ch, 0) <= 0:
+                    continue
+                for i2 in range(L1):
+                    if pat[i2] >= 2 or used_y[i2]:
+                        continue
+                    if guess[i2] == ch:
+                        pat[i2] = 1
+                        used_y[i2] = True
+                        avail_y[ch] -= 1
+                        break
+
+            pat_str = "".join(str(x) for x in pat)
+            if score > best_score or (score == best_score and pat_str < best_pat_str):
+                best_score = score
+                best_pat_str = pat_str
+                best_align = list(current)
+            return
+
+        # Enumerate next match position (i2, j2)
+        for i2 in range(i, L1 - k + 1):
+            for j2 in range(j, L2 - k + 1):
+                if guess[i2] != answer[j2]:
+                    continue
+                # Must be on an LCS path
+                if dp[i2 + 1][j2 + 1] + 1 != dp[i2][j2]:
+                    continue
+                current.append((i2, j2))
+                dfs(k - 1, i2 + 1, j2 + 1, current)
+                current.pop()
+
+    dfs(lcs_len, 0, 0, [])
+
+    align = best_align
+    green_d2 = {gi: gj for gi, gj in align}
+    n_greens = len(green_d2)
+
+    # Yellow assignment
+    ans_used = [False] * L2
+    for gj in green_d2.values():
+        ans_used[gj] = True
+    state = [BLACK] * L1
+    for gi in green_d2:
+        state[gi] = GREEN
+    used_y = [False] * L1
+    for j in range(L2):
+        if ans_used[j]:
             continue
-        ch = guess[i]
-        if available.get(ch, 0) > 0:
-            state[i] = YELLOW
-            available[ch] -= 1
+        ch = answer[j]
+        for i in range(L1):
+            if state[i] >= GREEN or used_y[i]:
+                continue
+            if guess[i] == ch:
+                state[i] = YELLOW
+                used_y[i] = True
+                break
+    
+    total_matches = sum(
+    min(guess.count(c), answer.count(c))
+    for c in set(guess))
 
-    # Step 3: upgrade GREEN → BORDER at BOTH-boundary matches only
-    # BORDER only when the green lands at position 0 of BOTH guess and target,
-    # OR at the last position of BOTH simultaneously.
-    for i, j in ans_pos.items():
-        if (i == 0 and j == 0) or (i == L1 - 1 and j == L2 - 1):
-            state[i] = BORDER
+    # LCS-min-1 rule: exactly 1 match and guess is longer than answer and not at a real boundary.
+    # When L1 > L2, a lone interior match is shown as yellow by the site.
+    # When L1 == L2, the match stays green (prevents false yellows on equal-length pairs).
+    if n_greens == 1 and L1 > L2 and total_matches > 1:
+        gi, gj = align[0]
+        if not (gi == 0 and gj == 0) and not (gi == L1 - 1 and gj == L2 - 1):
+            state[gi] = YELLOW
 
-    # Step 4: concatenation between adjacent GREEN/BORDER pairs
-    concat     = [False] * L1
-    green_list = sorted(ans_pos.keys())
-    for k in range(len(green_list) - 1):
-        gi = green_list[k]
-        gj = green_list[k + 1]
-        if gj == gi + 1 and ans_pos[gj] == ans_pos[gi] + 1:
+    # Recalculate green dict after LCS-min-1
+    green_d3 = {gi: gj for gi, gj in align if state[gi] >= GREEN}
+    n_greens2 = len(green_d3)
+
+    # BORDER upgrade: any green matched at answer boundary → BORDER
+    for gi, gj in green_d3.items():
+        at_end = gi == L1 - 1 and gj == L2 - 1
+        at_start = gi == 0 and gj == 0
+        if at_end and n_greens2 >= 1:
+            state[gi] = BORDER
+        if at_start and n_greens2 >= 1:
+            state[gi] = BORDER
+
+    # Concat: adjacent greens consecutive in both guess and answer
+    green_list = sorted(green_d3.keys())
+    concat = [False] * L1
+    for m in range(len(green_list) - 1):
+        gi = green_list[m]
+        ni = green_list[m + 1]
+        if ni == gi + 1 and green_d3[ni] == green_d3[gi] + 1:
             concat[gi] = True
 
     # Encode
@@ -121,6 +174,7 @@ def get_pattern(guess: str, answer: str) -> int:
         v = state[i] * 2 + (1 if concat[i] else 0)
         result += v * (_BASE ** i)
     return result
+
 
 def matches_feedback(
     guess: str,
@@ -151,20 +205,26 @@ def matches_feedback(
         available[ch] = available.get(ch, 0) + 1
 
     # Step 1: GREEN / BORDER – forward subsequence scan
-    green_cand_pos: list[int] = []   # candidate index for each green, in order
-    green_guess_idx: list[int] = []  # corresponding guess index
+    # Precompute green/BORDER (index, letter) and next letter for concat.
+    green_specs: list[tuple[int, str]] = [(i, guess[i]) for i, s in enumerate(states) if s >= GREEN]
+    green_cand_pos: list[int] = []
+    green_guess_idx: list[int] = []
     ptr = 0
 
-    for i, s in enumerate(states):
-        if s < GREEN:
-            continue
-        ch = guess[i]
-        # find next occurrence of ch in candidate from ptr
-        j = ptr
-        while j < L2 and candidate[j] != ch:
-            j += 1
+    for k, (i, ch) in enumerate(green_specs):
+        next_ch = green_specs[k + 1][1] if k + 1 < len(green_specs) else None
+        need_concat = concats[i]
+        if need_concat and next_ch is not None:
+            # Must place at j so that candidate[j+1] == next_ch (next green is consecutive)
+            j = ptr
+            while j < L2 and (candidate[j] != ch or j + 1 >= L2 or candidate[j + 1] != next_ch):
+                j += 1
+        else:
+            j = ptr
+            while j < L2 and candidate[j] != ch:
+                j += 1
         if j == L2:
-            return False   # required letter not found in subsequence order
+            return False
         green_cand_pos.append(j)
         green_guess_idx.append(i)
         available[ch] -= 1

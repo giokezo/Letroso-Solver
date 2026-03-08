@@ -30,18 +30,12 @@ def init_log():
             f.write("timestamp,answer,turns,guesses\n")
 
 
-def log_result(answer: str, turns: int, guesses: list[str]):
+def log_result(answer: str, turns: int, guesses: list[tuple[str, str]]):
+    """guesses is a list of (word, feedback) pairs."""
     with open(LOG_FILE, "a") as f:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        guess_list = " -> ".join(guesses)
+        guess_list = " -> ".join(f"{w}({fb})" for w, fb in guesses)
         f.write(f"{ts},{answer},{turns},{guess_list}\n")
-
-# def log_result(answer: str, turns: int, guesses: list[tuple[str, str]]):
-#     """guesses is a list of (word, feedback) pairs."""
-#     with open(LOG_FILE, "a") as f:
-#         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-#         guess_list = " -> ".join(f"{w}({fb})" for w, fb in guesses)
-#         f.write(f"{ts},{answer},{turns},{guess_list}\n")
 
 # ── Selenium helpers ──────────────────────────────────────────────────────────
 
@@ -150,13 +144,13 @@ def read_feedback(driver: webdriver.Firefox, guess_index: int) -> str:
 
 # ── Single game ───────────────────────────────────────────────────────────────
 
-def solve_one(driver: webdriver.Firefox, vocab, weights, first) -> tuple[str | None, int, list[str]]:
+def solve_one(driver: webdriver.Firefox, vocab, weights, first) -> tuple[str | None, int, list[tuple[str, str]]]:
     """
-    Play one round. Returns (answer, turns, list_of_guesses).
+    Play one round. Returns (answer, turns, list of (word, feedback) pairs).
     answer is None if it failed.
     """
     candidates = list(vocab)
-    guesses = []
+    guesses: list[tuple[str, str]] = []
     turn = 0
 
     while True:
@@ -185,10 +179,8 @@ def solve_one(driver: webdriver.Firefox, vocab, weights, first) -> tuple[str | N
             guess, entropy = ranked[0]
             print(f"\r  Guess: {guess} ({entropy:.4f} bits) [{elapsed:.1f}s]")
             if len(ranked) > 1:
-                alts = ", ".join(f"{w} ({e:.2f})" for w, e in ranked[1:])
+                alts = ", ".join(f"{w} ({e:.4f})" for w, e in ranked[1:])
                 print(f"  Also good: {alts}")
-
-        guesses.append(guess)
 
         # Type the guess
         type_word(driver, guess)
@@ -205,7 +197,6 @@ def solve_one(driver: webdriver.Firefox, vocab, weights, first) -> tuple[str | N
                 press_backspace(driver)
                 time.sleep(0.05)
             candidates = [w for w in candidates if w != guess]
-            guesses.pop()
             turn -= 1
             continue
 
@@ -214,6 +205,7 @@ def solve_one(driver: webdriver.Firefox, vocab, weights, first) -> tuple[str | N
         # Read feedback
         feedback = read_feedback(driver, guess_idx)
         print(f"  Feedback: {feedback}")
+        guesses.append((guess, feedback))
 
         pattern_int = parse_pattern(feedback, len(guess))
         if pattern_int is None:
