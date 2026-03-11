@@ -6,11 +6,19 @@ from collections import Counter
 
 import multiprocessing as mp
 import os
+import numpy as np
 
 BLACK  = 0
 YELLOW = 1
 GREEN  = 2
 BORDER = 3
+
+# Frequency exponent for entropy weighting.
+# 1.0 = raw frequencies (default)
+# >1.0 = common words matter more  (e.g. 1.5, 2.0)
+# <1.0 = flatter distribution      (e.g. 0.5)
+# 0.0  = fully uniform (frequency ignored)
+FREQ_ALPHA: float = 1.0
 
 _BASE = 8   # state*2 + concat_right  →  values 0–7
 
@@ -247,42 +255,53 @@ def compute_entropy(
     candidates: list[str],
     weights: dict[str, float],
 ) -> float:
-    total = sum(weights[w] for w in candidates)
+    raw = np.array([weights[w] ** FREQ_ALPHA for w in candidates], dtype=np.float64)
+    total = raw.sum()
     if total == 0:
         return 0.0
-
-    bucket: dict[int, float] = defaultdict(float)
-    for answer in candidates:
-        bucket[get_pattern(guess, answer)] += weights[answer] / total
-
-    return -sum(p * math.log2(p) for p in bucket.values() if p > 0)
+    w_arr = raw / total
+    pats   = np.array([get_pattern(guess, a) for a in candidates], dtype=np.int32)
+    bucket = np.bincount(pats, weights=w_arr)
+    probs  = bucket[bucket > 0]
+    return -float(np.dot(probs, np.log2(probs)))
 
 
 # Per-worker globals set by the pool initializer (avoids re-serializing
 # candidates and weights for every chunk).
 _worker_candidates: list[str] = []
-_worker_weights:    dict[str, float] = {}
-_worker_total:      float = 0.0
+_worker_weights_arr: np.ndarray = np.empty(0)
 
 
-def _worker_init(candidates: list[str], weights: dict[str, float]) -> None:
-    global _worker_candidates, _worker_weights, _worker_total
+def _dynamic_alpha(n: int) -> float:
+    """Scale FREQ_ALPHA up as candidates shrink — prioritise common words at endgame."""
+    if n >= 100:
+        return FREQ_ALPHA
+    elif n >= 10:
+        return FREQ_ALPHA
+    else:
+        return FREQ_ALPHA 
+
+
+def _worker_init(candidates: list[str], weights: dict[str, float], alpha: float) -> None:
+    global _worker_candidates, _worker_weights_arr
     _worker_candidates = candidates
-    _worker_weights    = weights
-    _worker_total      = sum(weights[w] for w in candidates)
+    raw = np.array([weights[w] ** alpha for w in candidates], dtype=np.float64)
+    total = raw.sum()
+    _worker_weights_arr = raw / total if total > 0 else np.zeros(len(candidates), dtype=np.float64)
 
 
 def _entropy_worker(chunk: list[str]) -> list[tuple[str, float]]:
     """Compute entropy for each guess in chunk against the shared candidate set."""
-    results = []
-    total = _worker_total
-    if total == 0:
+    candidates = _worker_candidates
+    w_arr      = _worker_weights_arr
+    if w_arr.sum() == 0:
         return [(g, 0.0) for g in chunk]
+    results = []
     for g in chunk:
-        bucket: dict[int, float] = defaultdict(float)
-        for answer in _worker_candidates:
-            bucket[get_pattern(g, answer)] += _worker_weights[answer] / total
-        ent = -sum(p * math.log2(p) for p in bucket.values() if p > 0)
+        pats   = np.array([get_pattern(g, a) for a in candidates], dtype=np.int32)
+        bucket = np.bincount(pats, weights=w_arr)
+        probs  = bucket[bucket > 0]
+        ent    = -float(np.dot(probs, np.log2(probs)))
         results.append((g, ent))
     return results
 
@@ -296,9 +315,9 @@ def rank_guesses(
 ) -> list[tuple[str, float]]:
     """
     Return top-n guesses by descending entropy.
-    When ≤ 500 candidates remain, only rank candidates (much faster).
-    Uses multiprocessing; candidates+weights are sent once per worker
-    via an initializer instead of being re-pickled for every chunk.
+    Searches all remaining candidates as potential guesses.
+    Uses multiprocessing; candidates, weights, and the dynamic alpha are
+    sent once per worker via an initializer instead of per-chunk pickling.
     """
 
     candidate_set = set(candidates)
@@ -306,18 +325,6 @@ def rank_guesses(
     # and guessing from outside that set rarely helps enough to justify the cost.
     search_space = candidates
     total        = len(search_space)
-
-    # # Single-threaded for small search spaces
-    # if total <= 200:
-    #     results: list[tuple[str, float]] = []
-    #     for i, g in enumerate(search_space):
-    #         results.append((g, compute_entropy(g, candidates, weights)))
-    #         if progress_fn and (i + 1) % 50 == 0:
-    #             progress_fn(i + 1, total)
-    #     if progress_fn:
-    #         progress_fn(total, total)
-    #     results.sort(key=lambda x: (x[1], x[0] in candidate_set), reverse=True)
-    #     return results[:top_n]
 
     # Split into many small chunks for frequent progress updates.
     # Each chunk is just a list[str] — candidates/weights go via initializer.
@@ -328,11 +335,13 @@ def rank_guesses(
     if progress_fn:
         progress_fn(0, total)
 
+    alpha = _dynamic_alpha(total)
+
     results = []
     with mp.Pool(
         n_workers,
         initializer=_worker_init,
-        initargs=(candidates, weights),
+        initargs=(candidates, weights, alpha),
     ) as pool:
         for chunk_results in pool.imap_unordered(_entropy_worker, chunks):
             results.extend(chunk_results)
