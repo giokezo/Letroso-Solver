@@ -1,8 +1,3 @@
-"""
-Manual Selenium solver: the player types words in the browser,
-Selenium reads the feedback, and top-10 recommendations are shown
-both as an overlay on the page and in the terminal.
-"""
 import os
 import time
 
