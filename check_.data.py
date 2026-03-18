@@ -4,6 +4,7 @@ def display_results():
     conn = sqlite3.connect('letroso_results.db')
     cursor = conn.cursor()
 
+
     query = """
         SELECT 
             g.session_id, 

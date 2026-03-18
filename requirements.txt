@@ -9,4 +9,4 @@ uvicorn[standard]
 webdriver-manager
 matplotlib
 seaborn
-ipykernel
+ipykernel    

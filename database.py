@@ -84,7 +84,8 @@ def delete_manual_by_name(name):
 
 if __name__ == "__main__":
     init_db()
-
+ 
+ 
     mariami_scores = [5, 5, 8, 3, 6, 16, 9, 10, 13, 7, 30, 7, 5, 2, 2, 4, 19, 8, 14, 13]
     add_manual_scores_list("Mariami", mariami_scores)
 

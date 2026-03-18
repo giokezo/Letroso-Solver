@@ -404,3 +404,4 @@ def parse_pattern(feedback: str, length: int) -> Optional[int]:
         v = states[i] * 2 + (1 if concat[i] else 0)
         result += v * (_BASE ** i)
     return result
+
