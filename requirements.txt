@@ -6,7 +6,3 @@ numpy
 pandas
 fastapi
 uvicorn[standard]
-webdriver-manager
-matplotlib
-seaborn
-ipykernel

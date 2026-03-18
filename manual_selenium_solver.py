@@ -1,8 +1,6 @@
 import os
 import time
-import json
 
-from database import start_new_session, save_game_score
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -18,10 +16,10 @@ from solver import load_data, load_first_guess
 from selenium_solver import open_browser, load_page, read_feedback, wait_for_feedback
 
 OVERLAY_ID = "solver_overlay"
-SESSION_OVERLAY_ID = "session_overlay"
+
 
 def inject_overlay(driver: webdriver.Firefox, lines: list[str], title: str = "") -> None:
-    """Original Top-Right suggestions panel."""
+    """Inject / update a floating recommendations panel on the page."""
     rows_html = "".join(
         f'<div style="padding:2px 0;font-size:13px;font-family:monospace">{line}</div>'
         for line in lines
@@ -47,84 +45,81 @@ def inject_overlay(driver: webdriver.Firefox, lines: list[str], title: str = "")
         el.innerHTML = {repr(html)};
     """)
 
-def inject_session_ui(driver: webdriver.Firefox, name: str = "") -> None:
-    """Bottom-Left Login UI with flicker prevention."""
-    target_state = "PLAYING" if name else "LOGIN"
-    driver.execute_script(f"""
-        var el = document.getElementById('{SESSION_OVERLAY_ID}');
-        var targetState = "{target_state}";
-        if (el && el.getAttribute('data-state') === targetState) return;
-        if (!el) {{
-            el = document.createElement('div');
-            el.id = '{SESSION_OVERLAY_ID}';
-            el.style.cssText = 'position:fixed;bottom:20px;left:20px;z-index:10000;background:rgba(30,30,30,0.95);color:#eee;border:2px solid #555;border-radius:10px;padding:15px;width:200px;box-shadow:0 0 15px rgba(0,0,0,0.5);pointer-events:auto;';
-            document.body.appendChild(el);
-        }}
-        el.setAttribute('data-state', targetState);
-        if (targetState === "LOGIN") {{
-            el.innerHTML = `
-                <div style="font-weight:bold;margin-bottom:8px;font-size:14px;">Letroso Solver</div>
-                <input type="text" id="student_input" placeholder="Name to save scores" 
-                    style="width:100%;padding:8px;background:#222;color:white;border:1px solid #777;border-radius:4px;margin-bottom:10px;box-sizing:border-box;">
-                <button id="start_btn" style="width:100%;padding:10px;background:#28a745;color:white;border:none;border-radius:4px;cursor:pointer;font-weight:bold;">START GAME</button>
-            `;
-            var input = document.getElementById('student_input');
-            input.onkeydown = function(e) {{ e.stopPropagation(); }};
-            document.getElementById('start_btn').onclick = function() {{
-                var val = input.value.trim();
-                if(val !== "") window.current_user = val;
-            }};
-        }} else {{
-            el.innerHTML = `
-                <div style="font-weight:bold;color:#00ff88;font-size:14px;">{name} is playing👾</div>
-                <div style="font-size:11px;color:#aaa;margin-bottom:10px;">Scores being saved.</div>
-                <button id="end_btn" style="width:100%;padding:8px;background:#dc3545;color:white;border:none;border-radius:4px;cursor:pointer;font-weight:bold;">STOP GAME</button>
-            `;
-            document.getElementById('end_btn').onclick = function() {{
-                window.current_user = "SIGNAL_EXIT_SESSION";
-            }};
-        }}
-    """)
 
 def remove_overlay(driver: webdriver.Firefox) -> None:
-    driver.execute_script(f"var el = document.getElementById('{OVERLAY_ID}'); if (el) el.remove();")
+    driver.execute_script(f"""
+        var el = document.getElementById('{OVERLAY_ID}');
+        if (el) el.remove();
+    """)
+
 
 def read_guess_word(driver: webdriver.Firefox, guess_index: int) -> str:
+    """Read the letters the player typed for a given guess row."""
     board = driver.find_element(By.CSS_SELECTOR, ".board")
     guesses = board.find_elements(By.CSS_SELECTOR, ".guess")
     letters = guesses[guess_index].find_elements(By.CSS_SELECTOR, ".letter")
     return "".join(l.text.strip().lower() for l in letters)
 
+
 def count_submitted_guesses(driver: webdriver.Firefox) -> int:
+    """Return how many guess rows already have feedback classes."""
     try:
         board = driver.find_element(By.CSS_SELECTOR, ".board")
         guesses = board.find_elements(By.CSS_SELECTOR, ".guess")
         count = 0
         for g in guesses:
             letters = g.find_elements(By.CSS_SELECTOR, ".letter")
-            if not letters: break
+            if not letters:
+                break
+            # A submitted guess has feedback classes beyond just "letter"
             first_cls = letters[0].get_attribute("class") or ""
-            if set(first_cls.split()) - {"letter"}: count += 1
-            else: break
+            extra = set(first_cls.split()) - {"letter"}
+            if extra:
+                count += 1
+            else:
+                break
         return count
-    except: return 0
+    except Exception:
+        return 0
+
 
 def wait_for_next_submission(driver: webdriver.Firefox, expected_index: int) -> bool:
+    """Block until the player submits their next word (guess_index = expected_index)."""
     while True:
-        if count_submitted_guesses(driver) > expected_index: return True
+        submitted = count_submitted_guesses(driver)
+        if submitted > expected_index:
+            return True
         time.sleep(0.3)
 
-def show_recommendations(driver: webdriver.Firefox, ranked: list[tuple[str, float]], candidates: list[str], turn: int) -> None:
-    n = len(candidates)
-    lines = [f"{('►' if i == 0 else f'{i+1:2}.')} {w:<14} {e:.4f} bits" for i, (w, e) in enumerate(ranked)]
-    lines.append(f"── {n:,} candidate{'s' if n != 1 else ''} remaining ──")
-    inject_overlay(driver, lines, title=f"Turn {turn} — top {len(ranked)} suggestions")
 
-def play(driver: webdriver.Firefox, vocab: list[str], weights: dict, first) -> tuple:
-    """Original play logic modified only to return (opener, score)."""
+def show_recommendations(
+    driver: webdriver.Firefox,
+    ranked: list[tuple[str, float]],
+    candidates: list[str],
+    turn: int,
+) -> None:
+    n = len(candidates)
+    lines = []
+    for i, (word, ent) in enumerate(ranked):
+        marker = "►" if i == 0 else f"{i+1:2}."
+        lines.append(f"{marker} {word:<14} {ent:.4f} bits")
+
+    lines.append(f"── {n:,} candidate{'s' if n != 1 else ''} remaining ──")
+
+    title = f"Turn {turn} — top {len(ranked)} suggestions"
+    inject_overlay(driver, lines, title=title)
+
+    # Also print to terminal
+    print(f"\n  Top suggestions (turn {turn}, {n:,} candidates):")
+    for i, (word, ent) in enumerate(ranked):
+        marker = "►" if i == 0 else f"  "
+        print(f"  {marker} {word:<14} {ent:.4f} bits")
+
+
+def play(driver: webdriver.Firefox, vocab: list[str], weights: dict, first) -> bool:
+    """Returns True if solved, False if failed (no candidates remain)."""
     candidates = list(vocab)
     turn = 0
-    opener = ""
 
     def _progress(done, total):
         pct = done / total * 100 if total else 0
@@ -132,14 +127,16 @@ def play(driver: webdriver.Firefox, vocab: list[str], weights: dict, first) -> t
 
     while True:
         turn += 1
+
         if len(candidates) == 0:
-            print("\nNo candidates remain.")
-            return opener, 0
+            print("\nNo candidates remain — moving to next game.")
+            return False
 
         if len(candidates) == 1:
             word = candidates[0]
             inject_overlay(driver, [f"► {word}   (only candidate)"], title=f"Turn {turn} — answer found!")
             print(f"\n  Only candidate: {word}")
+            print(f"  Type '{word}' in the browser and press Enter.")
 
         if turn == 1:
             print(f"\n  Type your first word in the browser and press Enter...")
@@ -147,91 +144,95 @@ def play(driver: webdriver.Firefox, vocab: list[str], weights: dict, first) -> t
             print(f"\n  Type your word in the browser and press Enter...")
 
         wait_for_next_submission(driver, turn - 1)
+
+        # Brief pause for animation to settle
         time.sleep(1.2)
 
-        guess = read_guess_word(driver, turn - 1)
-        if turn == 1: opener = guess # Track first word
+        guess_idx = turn - 1
+        try:
+            wait_for_feedback(driver, guess_idx, timeout=5)
+        except Exception:
+            pass
 
-        feedback = read_feedback(driver, turn - 1)
+        guess    = read_guess_word(driver, guess_idx)
+        feedback = read_feedback(driver, guess_idx)
         print(f"  You played:  {guess}")
         print(f"  Feedback:    {feedback}")
 
+        if not guess:
+            print("  Could not read guess from browser.")
+            return False
+
         pattern_int = parse_pattern(feedback, len(guess))
+        if pattern_int is None:
+            print(f"  ERROR: Could not parse feedback '{feedback}'")
+            return False
+
         if is_win_pattern(pattern_int, len(guess)):
             remove_overlay(driver)
-            print(f"\n  Solved in {turn} turns! Answer: {guess}")
-            return opener, turn
+            print(f"\n  Solved in {turn} turn{'s' if turn > 1 else ''}!  Answer: {guess}")
+            return True
 
+        old_count  = len(candidates)
         candidates = filter_candidates(candidates, guess, pattern_int)
-        print(f"  {len(candidates):,} candidates remaining")
+        print(f"  {old_count:,} → {len(candidates):,} candidates remaining")
+
+        if 0 < len(candidates) <= 15:
+            print(f"  Remaining: {', '.join(candidates)}")
+
+        if len(candidates) == 0:
+            continue  # overlay keeps last content; handled at top of next loop
 
         inject_overlay(driver, ["⏳ Computing recommendations..."], title=f"Turn {turn + 1}")
 
         t0 = time.time()
-
         ranked = rank_guesses(candidates, vocab, weights, top_n=10, progress_fn=_progress)
         print(f"\r  Done in {time.time()-t0:.1f}s            ")
         show_recommendations(driver, ranked, candidates, turn + 1)
 
-def _wait_for_board_reset(driver: webdriver.Firefox) -> None:
-    while count_submitted_guesses(driver) != 0:
+
+def _wait_for_board_reset(driver: webdriver.Firefox, timeout: float = 300) -> None:
+    """Wait until the board is empty again (user clicked play again on the site)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if count_submitted_guesses(driver) == 0:
+            return
         time.sleep(0.5)
+
 
 def main() -> None:
     print("Loading vocabulary...")
     vocab, weights = load_data()
     first = load_first_guess()
+    print(f"Vocabulary: {len(vocab):,} words")
+
     print("Opening browser...")
     driver = open_browser()
 
-    current_session_id = None
-    student_name = None
-
+    game_num = 0
     try:
         while True:
+            game_num += 1
+            print(f"\n{'='*50}")
+            print(f"  GAME #{game_num}  —  play in the browser, I'll guide you")
+            print(f"{'='*50}")
 
-            inject_session_ui(driver, name=student_name)
-            
-            while count_submitted_guesses(driver) == 0:
-                user_signal = driver.execute_script("return window.current_user;")
-                if user_signal == "SIGNAL_EXIT_SESSION":
-                    student_name, current_session_id = None, None
-                    driver.execute_script("window.current_user = null;")
-                    inject_session_ui(driver, name=None)
-                elif user_signal and user_signal != "SIGNAL_EXIT_SESSION" and not current_session_id:
-                    student_name = user_signal
-                    current_session_id = start_new_session(student_name)
-                    print(f"Session {current_session_id} started: {student_name}")
-                    inject_session_ui(driver, name=student_name)
-                time.sleep(0.2)
+            solved = play(driver, vocab, weights, first)
 
-            opener_word, score = play(driver, vocab, weights, first)
-
-
-            if score > 0 and current_session_id:
-                save_game_score(current_session_id, opener_word, score)
-                print(f"Data saved for {student_name}")
-
-
-            print("Waiting for next game reset...")
-            while count_submitted_guesses(driver) > 0:
-                user_signal = driver.execute_script("return window.current_user;")
-                if user_signal == "SIGNAL_EXIT_SESSION":
-                    student_name, current_session_id = None, None
-                    driver.execute_script("window.current_user = null;")
-                    inject_session_ui(driver, name=None)
-                elif user_signal and not current_session_id:
-                    student_name = user_signal
-                    current_session_id = start_new_session(student_name)
-                    inject_session_ui(driver, name=student_name)
-                time.sleep(0.5)
-            
-            remove_overlay(driver)
+            if solved:
+                print("\n  Click 'Play again' in the browser to start the next game...")
+                _wait_for_board_reset(driver)
+            else:
+                print("\n  Starting next game in 3s...")
+                time.sleep(3)
+                load_page(driver)
 
     except KeyboardInterrupt:
         pass
     finally:
+        print("\nClosing browser.")
         driver.quit()
+
 
 if __name__ == "__main__":
     main()
